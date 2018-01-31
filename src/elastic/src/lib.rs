@@ -287,6 +287,8 @@ extern crate futures_cpupool;
 #[macro_use]
 extern crate log;
 extern crate reqwest;
+extern crate bytes;
+extern crate crossbeam_channel as channel;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;

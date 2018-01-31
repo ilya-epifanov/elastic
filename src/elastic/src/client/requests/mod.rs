@@ -49,7 +49,9 @@ pub use self::index_exists::IndexExistsRequestBuilder;
 
 // Misc requests
 pub mod ping;
+pub mod bulk;
 pub use self::ping::PingRequestBuilder;
+pub use self::bulk::BulkRequestBuilder;
 
 /**
 A builder for a request.
