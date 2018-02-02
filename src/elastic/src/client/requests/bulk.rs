@@ -94,21 +94,48 @@ where
     where
         TResponse: ChangeIndex<I>,
     {
-        unimplemented!()
+        RequestBuilder::new(
+            self.client,
+            self.params,
+            BulkRequestInner {
+                index: self.inner.index,
+                ty: self.inner.ty,
+                body: self.inner.body,
+                _marker: PhantomData,
+            },
+        )
     }
 
     pub fn response_ty<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewType>
     where
         TResponse: ChangeType<I>,
     {
-        unimplemented!()
+        RequestBuilder::new(
+            self.client,
+            self.params,
+            BulkRequestInner {
+                index: self.inner.index,
+                ty: self.inner.ty,
+                body: self.inner.body,
+                _marker: PhantomData,
+            },
+        )
     }
 
     pub fn response_id<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewId>
     where
         TResponse: ChangeId<I>,
     {
-        unimplemented!()
+        RequestBuilder::new(
+            self.client,
+            self.params,
+            BulkRequestInner {
+                index: self.inner.index,
+                ty: self.inner.ty,
+                body: self.inner.body,
+                _marker: PhantomData,
+            },
+        )
     }
 }
 
@@ -118,7 +145,16 @@ where
 {
     /** Set the type for the update request. */
     pub fn errors_only(self) -> BulkRequestBuilder<TSender, TBody, BulkErrorsResponse<TIndex, TType, TId>> {
-        unimplemented!()
+        RequestBuilder::new(
+            self.client,
+            self.params,
+            BulkRequestInner {
+                index: self.inner.index,
+                ty: self.inner.ty,
+                body: self.inner.body,
+                _marker: PhantomData,
+            },
+        )
     }
 }
 
@@ -250,8 +286,10 @@ where
     type SinkError = Error;
 
     fn start_send(&mut self, item: Self::SinkItem) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        // TODO: if timer expired, call `poll_complete`
-        // TODO: if over capacity, call `poll_complete`
+        // TODO: if timer expired, `NotReady`
+        // TODO: if full, `NotReady`
+        // TODO: handle events larger than initial capacity. Throw error?
+        // TODO: set a `flush` bool when we trigger over capacity
         if self.has_capacity() {
             self.push(item);
             Ok(AsyncSink::Ready)
@@ -262,6 +300,7 @@ where
     }
 
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        // TODO: if has capacity, not flush and timer hasn't expired, `NotReady`
         if !self.is_empty() {
             unimplemented!()
         }
@@ -283,6 +322,7 @@ impl BulkBody for Vec<u8> {
     }
 }
 
+#[doc(hidden)]
 pub trait ChangeIndex<TIndex> { type WithNewIndex; }
 
 impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkResponse<TIndex, TType, TId> {
@@ -293,6 +333,7 @@ impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkErrorsRespons
     type WithNewIndex = BulkErrorsResponse<TNewIndex, TType, TId>;
 }
 
+#[doc(hidden)]
 pub trait ChangeType<TType> { type WithNewType; }
 
 impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkResponse<TIndex, TType, TId> {
@@ -303,6 +344,7 @@ impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkErrorsResponse<T
     type WithNewType = BulkErrorsResponse<TIndex, TNewType, TId>;
 }
 
+#[doc(hidden)]
 pub trait ChangeId<TId> { type WithNewId; }
 
 impl<TIndex, TType, TId, TNewId> ChangeId<TNewId> for BulkResponse<TIndex, TType, TId> {
@@ -457,7 +499,9 @@ where
         }
 
         serde_json::to_writer(&mut writer, &Header { action: self.action, inner: &self.header })?;
+        write!(&mut writer, "\n")?;
         serde_json::to_writer(&mut writer, &self.doc)?;
+        write!(&mut writer, "\n")?;
 
         Ok(())
     }
