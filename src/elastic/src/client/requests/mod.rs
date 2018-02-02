@@ -194,6 +194,13 @@ pub mod prelude {
     pub use super::params::*;
     pub use super::endpoints::*;
 
+    pub use super::bulk::{
+        bulk_index,
+        bulk_update,
+        bulk_create,
+        bulk_delete,
+    };
+
     pub use super::{
         empty_body,
         DefaultBody,

@@ -1,6 +1,8 @@
 #![allow(missing_docs, warnings)]
 
 use std::{mem, fmt};
+use std::io::{self, Write};
+use std::ops::Deref;
 use std::time::Duration;
 use std::error::Error as StdError;
 use std::marker::PhantomData;
@@ -8,19 +10,22 @@ use std::marker::PhantomData;
 use bytes::{BufMut, BytesMut};
 use futures::{Future, Poll, Async, AsyncSink, Sink, Stream};
 use channel::{self, TrySendError, TryRecvError};
-use serde::ser::Serialize;
+use serde::ser::{Serialize, Serializer, SerializeMap};
 use serde::de::DeserializeOwned;
+use serde_json;
 
 use error::{self, Error};
 use client::{AsyncSender, Client, Sender, SyncSender};
 use client::requests::{empty_body, RequestBuilder, DefaultBody, SyncBody, AsyncBody};
-use client::requests::params::{Index, Type};
+use client::requests::params::{Index, Type, Id};
 use client::requests::endpoints::BulkRequest;
 use client::requests::raw::RawRequestInner;
 use client::responses::{BulkResponse, BulkErrorsResponse};
 use client::responses::parse::IsOk;
 
 pub type BulkRequestBuilder<TSender, TBody, TResponse> = RequestBuilder<TSender, BulkRequestInner<TBody, TResponse>>;
+
+pub use client::responses::bulk::Action;
 
 #[doc(hidden)]
 pub struct BulkRequestInner<TBody, TResponse> {
@@ -34,14 +39,14 @@ impl<TSender> Client<TSender>
 where
     TSender: Sender,
 {
-    pub fn bulk(&self) -> BulkRequestBuilder<TSender, DefaultBody, BulkResponse> {
+    pub fn bulk(&self) -> BulkRequestBuilder<TSender, Vec<u8>, BulkResponse> {
         RequestBuilder::new(
             self.clone(),
             None,
             BulkRequestInner {
                 index: None,
                 ty: None,
-                body: empty_body(),
+                body: Vec::new(),
                 _marker: PhantomData,
             },
         )
@@ -85,21 +90,21 @@ where
         self
     }
 
-    pub fn response_index<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::Changed>
+    pub fn response_index<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewIndex>
     where
         TResponse: ChangeIndex<I>,
     {
         unimplemented!()
     }
 
-    pub fn response_ty<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::Changed>
+    pub fn response_ty<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewType>
     where
         TResponse: ChangeType<I>,
     {
         unimplemented!()
     }
 
-    pub fn response_id<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::Changed>
+    pub fn response_id<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewId>
     where
         TResponse: ChangeId<I>,
     {
@@ -125,6 +130,7 @@ where
     fn push<TDocument, TOperation>(&mut self, op: TOperation)
     where
         TOperation: Into<BulkOperation<TDocument>>,
+        TDocument: Serialize,
     {
         self.inner.body.push(op.into());
     }
@@ -132,8 +138,20 @@ where
     pub fn append<TDocument, TOperation>(mut self, op: TOperation) -> Self
     where
         TOperation: Into<BulkOperation<TDocument>>,
+        TDocument: Serialize,
     {
         self.push(op);
+        self
+    }
+
+    pub fn extend<TIter, TDocument>(mut self, iter: TIter) -> Self
+    where
+        TIter: IntoIterator<Item = BulkOperation<TDocument>>,
+        TDocument: Serialize,
+    {
+        for op in iter.into_iter() {
+            self.push(op);
+        }
         self
     }
 }
@@ -179,6 +197,7 @@ impl<TSender, TBody, TDocument, TResponse> Extend<BulkOperation<TDocument>> for 
 where
     TSender: Sender,
     TBody: BulkBody,
+    TDocument: Serialize,
 {
     fn extend<T>(&mut self, iter: T) where
     T: IntoIterator<Item = BulkOperation<TDocument>>,
@@ -218,7 +237,7 @@ impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, 
         unimplemented!()
     }
 
-    pub fn stream(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
+    pub fn build(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
         unimplemented!()
     }
 }
@@ -253,37 +272,45 @@ where
 }
 
 pub trait BulkBody {
-    fn push<TDocument>(&mut self, op: BulkOperation<TDocument>);
+    fn push<TDocument>(&mut self, op: BulkOperation<TDocument>) -> Result<(), Error> where TDocument: Serialize;
 }
 
-pub trait ChangeIndex<TIndex> { type Changed; }
+impl BulkBody for Vec<u8> {
+    fn push<TDocument>(&mut self, op: BulkOperation<TDocument>) -> Result<(), Error> where TDocument: Serialize {
+        op.write(self).map_err(error::request)?;
+
+        Ok(())
+    }
+}
+
+pub trait ChangeIndex<TIndex> { type WithNewIndex; }
 
 impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkResponse<TIndex, TType, TId> {
-    type Changed = BulkResponse<TNewIndex, TType, TId>;
+    type WithNewIndex = BulkResponse<TNewIndex, TType, TId>;
 }
 
 impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkErrorsResponse<TIndex, TType, TId> {
-    type Changed = BulkErrorsResponse<TNewIndex, TType, TId>;
+    type WithNewIndex = BulkErrorsResponse<TNewIndex, TType, TId>;
 }
 
-pub trait ChangeType<TType> { type Changed; }
+pub trait ChangeType<TType> { type WithNewType; }
 
 impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkResponse<TIndex, TType, TId> {
-    type Changed = BulkResponse<TIndex, TNewType, TId>;
+    type WithNewType = BulkResponse<TIndex, TNewType, TId>;
 }
 
 impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkErrorsResponse<TIndex, TType, TId> {
-    type Changed = BulkErrorsResponse<TIndex, TNewType, TId>;
+    type WithNewType = BulkErrorsResponse<TIndex, TNewType, TId>;
 }
 
-pub trait ChangeId<TId> { type Changed; }
+pub trait ChangeId<TId> { type WithNewId; }
 
 impl<TIndex, TType, TId, TNewId> ChangeId<TNewId> for BulkResponse<TIndex, TType, TId> {
-    type Changed = BulkResponse<TIndex, TType, TNewId>;
+    type WithNewId = BulkResponse<TIndex, TType, TNewId>;
 }
 
 impl<TIndex, TType, TId, TNewId> ChangeId<TNewId> for BulkErrorsResponse<TIndex, TType, TId> {
-    type Changed = BulkErrorsResponse<TIndex, TType, TNewId>;
+    type WithNewId = BulkErrorsResponse<TIndex, TType, TNewId>;
 }
 
 pub struct Streamed<TDocument> {
@@ -312,8 +339,8 @@ impl<TDocument> Streamed<TDocument> {
         }
     }
 
-    fn push(&mut self, _op: BulkOperation<TDocument>) {
-
+    fn push(&mut self, op: BulkOperation<TDocument>) -> Result<(), Error> {
+        unimplemented!()
     }
 
     fn has_capacity(&self) -> bool {
@@ -326,7 +353,130 @@ impl<TDocument> Streamed<TDocument> {
 }
 
 pub struct BulkOperation<TDocument> {
+    action: Action,
+    header: BulkHeader,
     doc: Option<TDocument>,
+}
+
+#[derive(Serialize)]
+struct BulkHeader {
+    #[serde(rename = "_index", serialize_with = "serialize_param", skip_serializing_if = "Option::is_none")]
+    index: Option<Index<'static>>,
+    #[serde(rename = "_type", serialize_with = "serialize_param", skip_serializing_if = "Option::is_none")]
+    ty: Option<Type<'static>>,
+    #[serde(rename = "_id", serialize_with = "serialize_param", skip_serializing_if = "Option::is_none")]
+    id: Option<Id<'static>>,
+}
+
+fn serialize_param<S, T>(field: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    T: Deref<Target = str>,
+{
+    serializer.serialize_str(&*field.as_ref().expect("serialize `None` value"))
+}
+
+impl BulkOperation<()> {
+    pub fn new(action: Action) -> Self {
+        BulkOperation {
+            action,
+            header: BulkHeader {
+                index: None,
+                ty: None,
+                id: None,
+            },
+            doc: None,
+        }
+    }
+}
+
+impl<TDocument> BulkOperation<TDocument> {
+    pub fn index<I>(mut self, index: I) -> Self
+    where
+        I: Into<Index<'static>>,
+    {
+        self.header.index = Some(index.into());
+        self
+    }
+
+    pub fn ty<I>(mut self, ty: I) -> Self
+    where
+        I: Into<Type<'static>>,
+    {
+        self.header.ty = Some(ty.into());
+        self
+    }
+
+    pub fn id<I>(mut self, id: I) -> Self
+    where
+        I: Into<Id<'static>>,
+    {
+        self.header.id = Some(id.into());
+        self
+    }
+
+    pub fn doc<TNewDocument>(mut self, doc: TNewDocument) -> BulkOperation<TNewDocument> {
+        BulkOperation {
+            action: self.action,
+            header: self.header,
+            doc: Some(doc),
+        }
+    }
+}
+
+impl<TDocument> BulkOperation<TDocument>
+where
+    TDocument: Serialize
+{
+    pub fn write<W>(&self, mut writer: W) -> io::Result<()>
+    where
+        W: Write,
+    {
+        struct Header<'a> {
+            action: Action,
+            inner: &'a BulkHeader,
+        }
+
+        impl<'a> Serialize for Header<'a> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                where S: Serializer
+            {
+                let mut map = serializer.serialize_map(Some(1))?;
+                
+                let k = match self.action {
+                    Action::Create => "create",
+                    Action::Delete => "delete",
+                    Action::Index => "index",
+                    Action::Update => "update",
+                };
+
+                map.serialize_entry(k, &self.inner)?;
+                
+                map.end()
+            }
+        }
+
+        serde_json::to_writer(&mut writer, &Header { action: self.action, inner: &self.header })?;
+        serde_json::to_writer(&mut writer, &self.doc)?;
+
+        Ok(())
+    }
+}
+
+pub fn bulk_index() -> BulkOperation<()> {
+    BulkOperation::new(Action::Index)
+}
+
+pub fn bulk_update() -> BulkOperation<()> {
+    BulkOperation::new(Action::Update)
+}
+
+pub fn bulk_create() -> BulkOperation<()> {
+    BulkOperation::new(Action::Create)
+}
+
+pub fn bulk_delete() -> BulkOperation<()> {
+    BulkOperation::new(Action::Delete)
 }
 
 pub struct Pending<TResponse> {
@@ -452,7 +602,6 @@ impl StdError for Disconnected {
 #[cfg(test)]
 mod tests {
     use serde_json::{self, Value};
-    use super::ScriptBuilder;
     use prelude::*;
 
     
