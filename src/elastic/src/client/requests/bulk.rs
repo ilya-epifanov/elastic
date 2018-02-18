@@ -265,48 +265,33 @@ where
 }
 
 impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, TResponse> {
-    pub fn timeout(self, timeout: Duration) -> Self {
-        unimplemented!()
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.inner.body.timeout = timeout;
+        self
     }
 
-    pub fn chunk_size(self, chunk_size: usize) -> Self {
-        unimplemented!()
+    pub fn chunk_size(mut self, chunk_size: usize) -> Self {
+        self.inner.body.chunk_size = chunk_size;
+        self
     }
 
     pub fn build(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
-        unimplemented!()
-    }
-}
+        let (tx, rx) = channel::unbounded();
 
-impl<TDocument> Sink for Streamed<TDocument>
-where
-    TDocument: Serialize + Send + 'static,
-{
-    type SinkItem = BulkOperation<TDocument>;
-    type SinkError = Error;
+        let chunk_size = self.inner.body.chunk_size;
 
-    fn start_send(&mut self, item: Self::SinkItem) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        // TODO: if timer expired, `NotReady`
-        // TODO: if full, `NotReady`
-        // TODO: handle events larger than initial capacity. Throw error?
-        // TODO: set a `flush` bool when we trigger over capacity
-        if self.has_capacity() {
-            self.push(item);
-            Ok(AsyncSink::Ready)
-        }
-        else {
-            Ok(AsyncSink::NotReady(item))
-        }
-    }
+        let sender = BulkSender {
+            tx: BulkSenderInner(tx),
+            req: self,
+            scratch: Vec::new(),
+            body: BytesMut::with_capacity(chunk_size),
+        };
 
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        // TODO: if has capacity, not flush and timer hasn't expired, `NotReady`
-        if !self.is_empty() {
-            unimplemented!()
-        }
-        else {
-            Ok(Async::Ready(()))
-        }
+        let receiver = BulkReceiver {
+            rx: BulkReceiverInner(rx),
+        };
+
+        (sender, receiver)
     }
 }
 
@@ -322,75 +307,19 @@ impl BulkBody for Vec<u8> {
     }
 }
 
-#[doc(hidden)]
-pub trait ChangeIndex<TIndex> { type WithNewIndex; }
-
-impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkResponse<TIndex, TType, TId> {
-    type WithNewIndex = BulkResponse<TNewIndex, TType, TId>;
-}
-
-impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkErrorsResponse<TIndex, TType, TId> {
-    type WithNewIndex = BulkErrorsResponse<TNewIndex, TType, TId>;
-}
-
-#[doc(hidden)]
-pub trait ChangeType<TType> { type WithNewType; }
-
-impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkResponse<TIndex, TType, TId> {
-    type WithNewType = BulkResponse<TIndex, TNewType, TId>;
-}
-
-impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkErrorsResponse<TIndex, TType, TId> {
-    type WithNewType = BulkErrorsResponse<TIndex, TNewType, TId>;
-}
-
-#[doc(hidden)]
-pub trait ChangeId<TId> { type WithNewId; }
-
-impl<TIndex, TType, TId, TNewId> ChangeId<TNewId> for BulkResponse<TIndex, TType, TId> {
-    type WithNewId = BulkResponse<TIndex, TType, TNewId>;
-}
-
-impl<TIndex, TType, TId, TNewId> ChangeId<TNewId> for BulkErrorsResponse<TIndex, TType, TId> {
-    type WithNewId = BulkErrorsResponse<TIndex, TType, TNewId>;
-}
-
 pub struct Streamed<TDocument> {
-    scratch: Vec<u8>,
     chunk_size: usize,
-    body: BytesMut,
+    timeout: Duration,
     _marker: PhantomData<TDocument>,
 }
 
 impl<TDocument> Streamed<TDocument> {
     fn new() -> Self {
         Streamed {
-            scratch: Vec::new(),
             chunk_size: 1024 * 1024,
-            body: BytesMut::new(),
+            timeout: Duration::from_secs(30),
             _marker: PhantomData,
         }
-    }
-
-    fn take(&mut self) -> Self {
-        Streamed {
-            scratch: Vec::new(),
-            chunk_size: self.chunk_size,
-            body: mem::replace(&mut self.body, BytesMut::with_capacity(self.chunk_size)),
-            _marker: PhantomData,
-        }
-    }
-
-    fn push(&mut self, op: BulkOperation<TDocument>) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    fn has_capacity(&self) -> bool {
-        self.body.remaining_mut() > 0
-    }
-
-    fn is_empty(&self) -> bool {
-        self.body.len() == 0
     }
 }
 
@@ -548,8 +477,10 @@ impl<TResponse> Future for Pending<TResponse> {
 }
 
 pub struct BulkSender<TDocument, TResponse> {
-    tx: BulkSenderInner<TDocument>,
+    tx: BulkSenderInner<TResponse>,
     req: BulkRequestBuilder<AsyncSender, Streamed<TDocument>, TResponse>,
+    scratch: Vec<u8>,
+    body: BytesMut,
 }
 
 struct BulkSenderInner<T>(channel::Sender<T>);
@@ -557,6 +488,45 @@ struct BulkReceiverInner<T>(channel::Receiver<T>);
 
 pub struct BulkReceiver<TResponse> {
     rx: BulkReceiverInner<TResponse>
+}
+
+impl<TDocument, TResponse> BulkSender<TDocument, TResponse> {
+    fn request(&self) -> &Streamed<TDocument> {
+        &self.req.inner.body
+    }
+
+    fn take_body(&mut self) -> BytesMut {
+        let new_body = BytesMut::with_capacity(self.request().chunk_size);
+        mem::replace(&mut self.body, new_body)
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.body.remaining_mut() > 0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.body.len() == 0
+    }
+}
+
+impl<TDocument, TResponse> BulkSender<TDocument, TResponse>
+where
+    TDocument: Serialize,
+{
+    fn push(&mut self, op: BulkOperation<TDocument>) -> Result<(), Error> {
+        op.write(&mut self.scratch);
+
+        if self.scratch.len() < self.body.remaining_mut() {
+            self.body.put_slice(&self.scratch);
+        }
+        else {
+            unimplemented!();
+        }
+
+        self.scratch.clear();
+
+        Ok(())
+    }
 }
 
 impl<TDocument, TResponse> Sink for BulkSender<TDocument, TResponse>
@@ -568,13 +538,29 @@ where
     type SinkError = Error;
 
     fn start_send(&mut self, item: Self::SinkItem) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        self.req.inner.body.start_send(item)
+        // TODO: if timer expired, `NotReady`
+        // TODO: if full, `NotReady`
+        // TODO: handle events larger than initial capacity. Throw error?
+        // TODO: set a `flush` bool when we trigger over capacity
+        if self.has_capacity() {
+            self.push(item);
+            Ok(AsyncSink::Ready)
+        }
+        else {
+            Ok(AsyncSink::NotReady(item))
+        }
     }
 
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
         // TODO: Take body and send request if full or timeout expired
         // TODO: Send response on the `tx` stream
-        self.req.inner.body.poll_complete()
+        // TODO: if has capacity, not flush and timer hasn't expired, `NotReady`
+        if !self.is_empty() {
+            unimplemented!()
+        }
+        else {
+            Ok(Async::Ready(()))
+        }
     }
 }
 
@@ -641,6 +627,39 @@ impl StdError for Disconnected {
     fn description(&self) -> &str {
         "disconnected"
     }
+}
+
+#[doc(hidden)]
+pub trait ChangeIndex<TIndex> { type WithNewIndex; }
+
+impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkResponse<TIndex, TType, TId> {
+    type WithNewIndex = BulkResponse<TNewIndex, TType, TId>;
+}
+
+impl<TIndex, TType, TId, TNewIndex> ChangeIndex<TNewIndex> for BulkErrorsResponse<TIndex, TType, TId> {
+    type WithNewIndex = BulkErrorsResponse<TNewIndex, TType, TId>;
+}
+
+#[doc(hidden)]
+pub trait ChangeType<TType> { type WithNewType; }
+
+impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkResponse<TIndex, TType, TId> {
+    type WithNewType = BulkResponse<TIndex, TNewType, TId>;
+}
+
+impl<TIndex, TType, TId, TNewType> ChangeType<TNewType> for BulkErrorsResponse<TIndex, TType, TId> {
+    type WithNewType = BulkErrorsResponse<TIndex, TNewType, TId>;
+}
+
+#[doc(hidden)]
+pub trait ChangeId<TId> { type WithNewId; }
+
+impl<TIndex, TType, TId, TNewId> ChangeId<TNewId> for BulkResponse<TIndex, TType, TId> {
+    type WithNewId = BulkResponse<TIndex, TType, TNewId>;
+}
+
+impl<TIndex, TType, TId, TNewId> ChangeId<TNewId> for BulkErrorsResponse<TIndex, TType, TId> {
+    type WithNewId = BulkErrorsResponse<TIndex, TType, TNewId>;
 }
 
 #[cfg(test)]
