@@ -282,6 +282,7 @@ extern crate elastic_reqwest;
 extern crate elastic_types;
 #[macro_use]
 extern crate error_chain;
+#[macro_use]
 extern crate futures;
 extern crate futures_cpupool;
 #[macro_use]
@@ -295,6 +296,7 @@ extern crate serde_derive;
 #[cfg_attr(test, macro_use)]
 extern crate serde_json;
 extern crate tokio_core;
+extern crate tokio_timer;
 extern crate uuid;
 
 pub mod error;

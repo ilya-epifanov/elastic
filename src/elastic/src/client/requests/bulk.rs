@@ -9,13 +9,14 @@ use std::marker::PhantomData;
 
 use bytes::{BufMut, BytesMut};
 use futures::{Future, Poll, Async, AsyncSink, Sink, Stream};
+use tokio_timer::{Timer, Sleep};
 use channel::{self, TrySendError, TryRecvError};
 use serde::ser::{Serialize, Serializer, SerializeMap};
 use serde::de::DeserializeOwned;
 use serde_json;
 
 use error::{self, Error};
-use client::{AsyncSender, Client, Sender, SyncSender};
+use client::{AsyncSender, Client, Sender, SyncSender, RequestParams};
 use client::requests::{empty_body, RequestBuilder, DefaultBody, SyncBody, AsyncBody};
 use client::requests::params::{Index, Type, Id};
 use client::requests::endpoints::BulkRequest;
@@ -270,21 +271,41 @@ impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, 
         self
     }
 
-    pub fn chunk_size(mut self, chunk_size: usize) -> Self {
+    pub fn chunk_size_bytes(mut self, chunk_size: usize) -> Self {
         self.inner.body.chunk_size = chunk_size;
         self
     }
 
     pub fn build(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
-        let (tx, rx) = channel::unbounded();
+        let (tx, rx) = channel::bounded(1);
 
         let chunk_size = self.inner.body.chunk_size;
+        let duration = self.inner.body.timeout;
+
+        let timer = Timer::default();
+        let sleep = timer.sleep(duration);
 
         let sender = BulkSender {
-            tx: BulkSenderInner(tx),
-            req: self,
-            scratch: Vec::new(),
-            body: BytesMut::with_capacity(chunk_size),
+            tx: BulkSenderInner(Some(tx)),
+            req_template: SenderRequestTemplate {
+                client: self.client,
+                params: self.params,
+                index: self.inner.index,
+                ty: self.inner.ty,
+                _marker: PhantomData,
+            },
+            timeout: Timeout {
+                duration,
+                timer,
+                sleep,
+            },
+            body: SenderBody {
+                scratch: Vec::new(),
+                chunk_size,
+                body: BytesMut::with_capacity(chunk_size),
+            },
+            in_flight: BulkSenderInFlight::ReadyToSend,
+            _marker: PhantomData,
         };
 
         let receiver = BulkReceiver {
@@ -478,54 +499,132 @@ impl<TResponse> Future for Pending<TResponse> {
 
 pub struct BulkSender<TDocument, TResponse> {
     tx: BulkSenderInner<TResponse>,
-    req: BulkRequestBuilder<AsyncSender, Streamed<TDocument>, TResponse>,
-    scratch: Vec<u8>,
-    body: BytesMut,
+    req_template: SenderRequestTemplate<TResponse>,
+    in_flight: BulkSenderInFlight<TResponse>,
+    timeout: Timeout,
+    body: SenderBody,
+    _marker: PhantomData<TDocument>,
 }
 
-struct BulkSenderInner<T>(channel::Sender<T>);
+struct SenderBody {
+    scratch: Vec<u8>,
+    body: BytesMut,
+    chunk_size: usize,
+}
+
+struct SenderRequestTemplate<TResponse> {
+    client: Client<AsyncSender>,
+    params: Option<RequestParams>,
+    index: Option<Index<'static>>,
+    ty: Option<Type<'static>>,
+    _marker: PhantomData<TResponse>,
+}
+
+impl<TResponse> SenderRequestTemplate<TResponse> {
+    fn to_request(&self, body: Vec<u8>) -> BulkRequestBuilder<AsyncSender, Vec<u8>, TResponse> {
+        RequestBuilder::new(
+            self.client.clone(),
+            self.params.clone(),
+            BulkRequestInner::<Vec<u8>, TResponse> {
+                index: self.index.clone(),
+                ty: self.ty.clone(),
+                body: body,
+                _marker: PhantomData,
+            }
+        )
+    }
+}
+
+struct Timeout {
+    timer: Timer,
+    duration: Duration,
+    sleep: Sleep,
+}
+
+impl Timeout {
+    fn restart(&mut self) {
+        self.sleep = self.timer.sleep(self.duration);
+    }
+}
+
+impl Future for Timeout {
+    type Item = ();
+    type Error = Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        self.sleep.poll().map_err(error::request)
+    }
+}
+
+enum BulkSenderInFlight<TResponse> {
+    ReadyToSend,
+    Pending(Pending<TResponse>),
+    Transmitting(Option<TResponse>),
+    Transmitted,
+}
+
+struct BulkSenderInner<T>(Option<channel::Sender<T>>);
 struct BulkReceiverInner<T>(channel::Receiver<T>);
 
 pub struct BulkReceiver<TResponse> {
     rx: BulkReceiverInner<TResponse>
 }
 
-impl<TDocument, TResponse> BulkSender<TDocument, TResponse> {
-    fn request(&self) -> &Streamed<TDocument> {
-        &self.req.inner.body
-    }
+enum SenderPush {
+    Flushed,
+    Full,
+}
 
-    fn take_body(&mut self) -> BytesMut {
-        let new_body = BytesMut::with_capacity(self.request().chunk_size);
+impl SenderBody {
+    fn take(&mut self) -> BytesMut {
+        let size = usize::max(self.scratch.len(), self.chunk_size);
+        let mut new_body = BytesMut::with_capacity(size);
+
+        // Copy out any scratch into the new buffer
+        if self.scratch.len() > 0 {
+            new_body.put_slice(&self.scratch);
+            self.scratch.clear();
+        }
+
         mem::replace(&mut self.body, new_body)
     }
 
     fn has_capacity(&self) -> bool {
-        self.body.remaining_mut() > 0
+        self.scratch.len() == 0 && self.body.remaining_mut() > 0
     }
 
     fn is_empty(&self) -> bool {
         self.body.len() == 0
     }
-}
 
-impl<TDocument, TResponse> BulkSender<TDocument, TResponse>
-where
-    TDocument: Serialize,
-{
-    fn push(&mut self, op: BulkOperation<TDocument>) -> Result<(), Error> {
-        op.write(&mut self.scratch);
+    fn is_full(&self) -> bool {
+        self.scratch.len() > 0
+    }
 
+    fn push<TDocument>(&mut self, op: BulkOperation<TDocument>) -> Result<SenderPush, io::Error>
+    where
+        TDocument: Serialize,
+    {
+        op.write(&mut self.scratch)?;
+
+        // Copy the scratch buffer into the request buffer if it fits
         if self.scratch.len() < self.body.remaining_mut() {
             self.body.put_slice(&self.scratch);
+            self.scratch.clear();
+
+            Ok(SenderPush::Flushed)
+        }
+        else if self.body.len() == 0 {
+            let scratch = mem::replace(&mut self.scratch, Vec::new());
+            self.body = BytesMut::from(scratch);
+
+            Ok(SenderPush::Flushed)
         }
         else {
-            unimplemented!();
+            // If the buffer doesn't fit, then retain it for the next request?
+            // That means returning `Async::Ready` for a request that isn't going to be sent immediately
+            Ok(SenderPush::Full)
         }
-
-        self.scratch.clear();
-
-        Ok(())
     }
 }
 
@@ -538,29 +637,90 @@ where
     type SinkError = Error;
 
     fn start_send(&mut self, item: Self::SinkItem) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        // TODO: if timer expired, `NotReady`
-        // TODO: if full, `NotReady`
-        // TODO: handle events larger than initial capacity. Throw error?
-        // TODO: set a `flush` bool when we trigger over capacity
-        if self.has_capacity() {
-            self.push(item);
+        match self.timeout.poll() {
+            Ok(Async::Ready(())) => {
+                return match self.poll_complete() {
+                    Ok(_) => Ok(AsyncSink::NotReady(item)),
+                    Err(e) => Err(e)
+                }
+            },
+            Err(e) => return Err(error::request(e)),
+            _ => ()
+        }
+
+        if self.body.has_capacity() {
+            self.body.push(item).map_err(error::request)?;
             Ok(AsyncSink::Ready)
         }
         else {
-            Ok(AsyncSink::NotReady(item))
+            match self.poll_complete() {
+                Ok(_) => Ok(AsyncSink::NotReady(item)),
+                Err(e) => Err(e)
+            }
         }
     }
 
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        // TODO: Take body and send request if full or timeout expired
-        // TODO: Send response on the `tx` stream
-        // TODO: if has capacity, not flush and timer hasn't expired, `NotReady`
-        if !self.is_empty() {
-            unimplemented!()
-        }
-        else {
-            Ok(Async::Ready(()))
-        }
+        let in_flight = match self.in_flight {
+            // The `Sender` is ready to send another request
+            BulkSenderInFlight::ReadyToSend => {
+                // If the body is empty, then we have nothing to do
+                if self.body.is_empty() {
+                    return Ok(Async::Ready(()))
+                }
+
+                // If the timeout hasn't expired and the body isn't full then we're not ready
+                match self.timeout.poll() {
+                    Ok(Async::NotReady) if !self.body.is_full() => return Ok(Async::NotReady),
+                    Err(e) => return Err(error::request(e)),
+                    _ => ()
+                }
+
+                self.timeout.restart();
+                let body = self.body.take();
+
+                let req = self.req_template.to_request(body.to_vec());
+                let pending = req.send();
+
+                BulkSenderInFlight::Pending(pending)
+            }
+            // A request is pending
+            BulkSenderInFlight::Pending(ref mut pending) => {
+                let response = try_ready!(pending.poll());
+                BulkSenderInFlight::Transmitting(Some(response))
+            }
+            // A response is transmitting
+            BulkSenderInFlight::Transmitting(ref mut response) => {
+                if let Some(item) = response.take() {
+                    match self.tx.start_send(item) {
+                        Ok(AsyncSink::Ready) => {
+                            BulkSenderInFlight::Transmitted
+                        },
+                        Ok(AsyncSink::NotReady(item)) => {
+                            *response = Some(item);
+                            return Ok(Async::NotReady)
+                        },
+                        Err(e) => return Err(e)
+                    }
+                }
+                else {
+                    BulkSenderInFlight::Transmitted
+                }
+            }
+            // The request has completed
+            BulkSenderInFlight::Transmitted => {
+                let _ = try_ready!(self.tx.poll_complete());
+                BulkSenderInFlight::ReadyToSend
+            }
+        };
+
+        self.in_flight = in_flight;
+        self.poll_complete()
+    }
+
+    fn close(&mut self) -> Poll<(), Self::SinkError> {
+        let _ = try_ready!(self.poll_complete());
+        self.tx.close()
     }
 }
 
@@ -572,14 +732,20 @@ where
     type SinkError = Error;
 
     fn start_send(&mut self, item: Self::SinkItem) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        match self.0.try_send(item) {
+        self.0.as_ref().map(|tx| match tx.try_send(item) {
             Ok(()) => Ok(AsyncSink::Ready),
             Err(TrySendError::Full(item)) => Ok(AsyncSink::NotReady(item)),
             Err(TrySendError::Disconnected(_)) => Err(error::request(Disconnected)),
-        }
+        })
+        .unwrap_or(Err(error::request(Disconnected)))
     }
 
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        Ok(Async::Ready(()))
+    }
+
+    fn close(&mut self) -> Poll<(), Self::SinkError> {
+        self.0 = None;
         Ok(Async::Ready(()))
     }
 }
@@ -607,7 +773,7 @@ where
         match self.0.try_recv() {
             Ok(item) => Ok(Async::Ready(Some(item))),
             Err(TryRecvError::Empty) => Ok(Async::NotReady),
-            Err(TryRecvError::Disconnected) => Err(error::request(Disconnected)),
+            Err(TryRecvError::Disconnected) => Ok(Async::Ready(None)),
         }
     }
 }

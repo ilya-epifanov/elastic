@@ -15,6 +15,7 @@ extern crate tokio_core;
 extern crate serde_json;
 
 use std::error::Error;
+use std::time::Duration;
 use futures::{stream, Future, Stream, Sink};
 use tokio_core::reactor::Core;
 use elastic::prelude::*;
@@ -30,6 +31,8 @@ fn run() -> Result<(), Box<Error>> {
     let (bulk_stream, bulk_responses) = client.bulk_stream()
         .index("bulk_idx")
         .ty("bulk_ty")
+        .timeout(Duration::from_secs(5))
+        .chunk_size_bytes(1024)
         .build();
 
     let ops = (0..1000)
@@ -44,10 +47,11 @@ fn run() -> Result<(), Box<Error>> {
     let req_future = bulk_stream.send_all(stream::iter_ok(ops));
 
     let res_future = bulk_responses.for_each(|bulk| {
+        println!("repsonse:");
         for op in bulk {
             match op {
-                Ok(op) => println!("ok: {:?}", op),
-                Err(op) => println!("err: {:?}", op),
+                Ok(op) => println!("  ok: {:?}", op),
+                Err(op) => println!("  err: {:?}", op),
             }
         }
 
