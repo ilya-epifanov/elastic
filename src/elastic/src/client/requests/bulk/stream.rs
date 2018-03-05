@@ -109,6 +109,11 @@ impl Future for Timeout {
     }
 }
 
+/**
+The current state of the `BulkSender`.
+
+The `BulkSender` and `BulkBody` combination means operations can be pushed while a single request is in-flight.
+*/
 enum BulkSenderInFlight<TResponse> {
     ReadyToSend,
     Pending(Pending<TResponse>),
@@ -123,31 +128,28 @@ pub struct BulkReceiver<TResponse> {
     rx: BulkReceiverInner<TResponse>
 }
 
-enum SenderPush {
-    Flushed,
-    Full,
-}
-
 pub(super) struct SenderBody {
     scratch: Vec<u8>,
     body: BytesMut,
-    chunk_size: usize,
+    size: usize,
 }
 
 impl SenderBody {
-    pub(super) fn new(chunk_size: usize) -> Self {
+    pub(super) fn new(size: usize) -> Self {
         SenderBody {
             scratch: Vec::new(),
-            chunk_size,
-            body: BytesMut::with_capacity(chunk_size),
+            size,
+            body: BytesMut::with_capacity(size),
         }
     }
 
     fn take(&mut self) -> BytesMut {
-        let size = usize::max(self.scratch.len(), self.chunk_size);
+        // Make sure any oversize remaining scratch can be copied to the new buffer
+        let size = usize::max(self.scratch.len(), self.size);
         let mut new_body = BytesMut::with_capacity(size);
 
         // Copy out any scratch into the new buffer
+        // This would probably be a single operation that didn't fit
         if self.scratch.len() > 0 {
             new_body.put_slice(&self.scratch);
             self.scratch.clear();
@@ -168,7 +170,7 @@ impl SenderBody {
         self.scratch.len() > 0
     }
 
-    fn push<TDocument>(&mut self, op: BulkOperation<TDocument>) -> Result<SenderPush, io::Error>
+    fn push<TDocument>(&mut self, op: BulkOperation<TDocument>) -> Result<(), io::Error>
     where
         TDocument: Serialize,
     {
@@ -179,18 +181,18 @@ impl SenderBody {
             self.body.put_slice(&self.scratch);
             self.scratch.clear();
 
-            Ok(SenderPush::Flushed)
+            Ok(())
         }
+        // If the body is empty and the buffer doesn't fit, replace the current body buffer
         else if self.body.len() == 0 {
             let scratch = mem::replace(&mut self.scratch, Vec::new());
             self.body = BytesMut::from(scratch);
 
-            Ok(SenderPush::Flushed)
+            Ok(())
         }
+        // If the buffer doesn't fit, then retain it for the next request
         else {
-            // If the buffer doesn't fit, then retain it for the next request?
-            // That means returning `Async::Ready` for a request that isn't going to be sent immediately
-            Ok(SenderPush::Full)
+            Ok(())
         }
     }
 }
@@ -205,14 +207,16 @@ where
 
     fn start_send(&mut self, item: Self::SinkItem) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
         match self.timeout.poll() {
-            Ok(Async::Ready(())) => {
+            // Only respect the timeout if the body is not empty
+            Ok(Async::Ready(())) if !self.body.is_empty() => {
                 return match self.poll_complete() {
                     Ok(_) => Ok(AsyncSink::NotReady(item)),
                     Err(e) => Err(e)
                 }
             },
+            // Continue
+            Ok(Async::Ready(_)) | Ok(Async::NotReady) => (),
             Err(e) => return Err(error::request(e)),
-            _ => ()
         }
 
         if self.body.has_capacity() {
@@ -231,19 +235,20 @@ where
         let in_flight = match self.in_flight {
             // The `Sender` is ready to send another request
             BulkSenderInFlight::ReadyToSend => {
-                // If the body is empty, then we have nothing to do
+                match self.timeout.poll() {
+                    // If the timeout hasn't expired and the body isn't full then we're not ready
+                    Ok(Async::NotReady) if !self.body.is_full() && !self.body.is_empty() => return Ok(Async::NotReady),
+                    // Continue
+                    Ok(Async::NotReady) => (),
+                    // Restart the expired timer
+                    Ok(Async::Ready(())) => self.timeout.restart(),
+                    Err(e) => return Err(error::request(e)),
+                }
+
                 if self.body.is_empty() {
                     return Ok(Async::Ready(()))
                 }
 
-                // If the timeout hasn't expired and the body isn't full then we're not ready
-                match self.timeout.poll() {
-                    Ok(Async::NotReady) if !self.body.is_full() => return Ok(Async::NotReady),
-                    Err(e) => return Err(error::request(e)),
-                    _ => ()
-                }
-
-                self.timeout.restart();
                 let body = self.body.take();
 
                 let req = self.req_template.to_request(body.to_vec());
@@ -260,9 +265,7 @@ where
             BulkSenderInFlight::Transmitting(ref mut response) => {
                 if let Some(item) = response.take() {
                     match self.tx.start_send(item) {
-                        Ok(AsyncSink::Ready) => {
-                            BulkSenderInFlight::Transmitted
-                        },
+                        Ok(AsyncSink::Ready) => BulkSenderInFlight::Transmitted,
                         Ok(AsyncSink::NotReady(item)) => {
                             *response = Some(item);
                             return Ok(Async::NotReady)
@@ -340,13 +343,15 @@ where
         match self.0.try_recv() {
             Ok(item) => Ok(Async::Ready(Some(item))),
             Err(TryRecvError::Empty) => Ok(Async::NotReady),
+            // If the channel is disconnected, then we're finished processing
             Err(TryRecvError::Disconnected) => Ok(Async::Ready(None)),
         }
     }
 }
 
-// Alternative disconnected error because `TrySendError` and `TryReceiveError`
-// don't implement `Error`.
+/**
+Alternative disconnected error because `TrySendError` and `TryReceiveError` don't implement `Error`.
+*/
 #[derive(Debug)]
 struct Disconnected;
 

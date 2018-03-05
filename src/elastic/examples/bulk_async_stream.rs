@@ -32,7 +32,7 @@ fn run() -> Result<(), Box<Error>> {
         .index("bulk_idx")
         .ty("bulk_ty")
         .timeout(Duration::from_secs(5))
-        .chunk_size_bytes(1024)
+        .body_size_bytes(1024)
         .build();
 
     let ops = (0..1000)

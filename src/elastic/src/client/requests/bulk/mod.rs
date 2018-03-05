@@ -71,7 +71,13 @@ impl<TSender, TBody, TResponse> BulkRequestBuilder<TSender, TBody, TResponse>
 where
     TSender: Sender,
 {
-    /** Set the default type for the bulk request. */
+    /**
+    Set the default type for the bulk request.
+    
+    If an operation doesn't specify a type, then it will default to the supplied value here.
+    
+    > **NOTE:** Calling `ty` without also calling `index` will result in an error when sending the request.
+    */
     pub fn ty<I>(mut self, ty: I) -> Self
     where
         I: Into<Type<'static>>,
@@ -80,7 +86,11 @@ where
         self
     }
 
-    /** Set the default index for the bulk request. */
+    /**
+    Set the default index for the bulk request.
+    
+    If an operation doesn't specify an index, then it will default to the supplied value here.
+    */
     pub fn index<I>(mut self, index: I) -> Self
     where
         I: Into<Index<'static>>,
@@ -89,6 +99,13 @@ where
         self
     }
 
+    /**
+    Set the type used to deserialize the index field on the response.
+    
+    Sometimes a bulk response will use the same index value many times.
+    To avoid allocating a lot of individual strings, the type used to deserialize the field can be changed.
+    `string_cache::DefaultAtom` or a custom `enum` can be effective ways to reduce allocations in large bulk responses.
+    */
     pub fn response_index<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewIndex>
     where
         TResponse: ChangeIndex<I>,
@@ -105,6 +122,13 @@ where
         )
     }
 
+    /**
+    Set the type used to deserialize the type field on the response.
+    
+    Sometimes a bulk response will use the same type value many times.
+    To avoid allocating a lot of individual strings, the type used to deserialize the field can be changed.
+    `string_cache::DefaultAtom` or a custom `enum` can be effective ways to reduce allocations in large bulk responses.
+    */
     pub fn response_ty<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewType>
     where
         TResponse: ChangeType<I>,
@@ -121,6 +145,13 @@ where
         )
     }
 
+    /**
+    Set the type used to deserialize the id field on the response.
+    
+    It's less likely that id fields in bulk responses will be repeated, but they're probably short.
+    To avoid allocating a lot of individual strings, the type used to deserialize the field can be changed.
+    `inlinable_string::InlinableString` can be an effective way to recude allocation in large bulk responses.
+    */
     pub fn response_id<I>(self) -> BulkRequestBuilder<TSender, TBody, TResponse::WithNewId>
     where
         TResponse: ChangeId<I>,
@@ -142,7 +173,9 @@ impl<TSender, TBody, TIndex, TType, TId> BulkRequestBuilder<TSender, TBody, Bulk
 where
     TSender: Sender,
 {
-    /** Set the type for the update request. */
+    /**
+    Only deserialize failed bulk operations in the response.
+    */
     pub fn errors_only(self) -> BulkRequestBuilder<TSender, TBody, BulkErrorsResponse<TIndex, TType, TId>> {
         RequestBuilder::new(
             self.client,
@@ -162,7 +195,7 @@ where
     TSender: Sender,
     TBody: BulkBody,
 {
-    fn push<TDocument, TOperation>(&mut self, op: TOperation)
+    fn push_internal<TDocument, TOperation>(&mut self, op: TOperation)
     where
         TOperation: Into<BulkOperation<TDocument>>,
         TDocument: Serialize,
@@ -170,24 +203,98 @@ where
         self.inner.body.with_inner_mut(|b| b.push(op.into()));
     }
 
-    pub fn append<TDocument, TOperation>(mut self, op: TOperation) -> Self
+    /**
+    Push an operation onto the bulk request.
+
+    > **NOTE:** If the operation can't be serialized then sending the request will return an error.
+    */
+    pub fn push<TDocument, TOperation>(mut self, op: TOperation) -> Self
     where
         TOperation: Into<BulkOperation<TDocument>>,
         TDocument: Serialize,
     {
-        self.push(op);
+        self.push_internal(op);
         self
     }
 
+    /**
+    Push a collection of operations onto the bulk request.
+
+    > **NOTE:** If any operations can't be serialized then sending the request will return an error.
+    */
     pub fn extend<TIter, TDocument>(mut self, iter: TIter) -> Self
     where
         TIter: IntoIterator<Item = BulkOperation<TDocument>>,
         TDocument: Serialize,
     {
         for op in iter.into_iter() {
-            self.push(op);
+            self.push_internal(op);
         }
         self
+    }
+}
+
+impl<TSender, TBody, TDocument, TResponse> Extend<BulkOperation<TDocument>> for BulkRequestBuilder<TSender, TBody, TResponse>
+where
+    TSender: Sender,
+    TBody: BulkBody,
+    TDocument: Serialize,
+{
+    fn extend<T>(&mut self, iter: T) where
+    T: IntoIterator<Item = BulkOperation<TDocument>>,
+    {
+        for op in iter.into_iter() {
+            self.push_internal(op);
+        }
+    }
+}
+
+impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, TResponse> {
+    /**
+    Specify a timeout for filling up the request buffer.
+
+    This parameter can be used to control the miminum frequency of bulk requests.
+    If the timeout expires before the buffer is full then a bulk request will be sent with whatever data was written.
+    The timeout isn't restarted when operations are pushed.
+    */
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.inner.body.with_inner_mut(|s| {
+            s.timeout = timeout;
+            Ok(())
+        });
+
+        self
+    }
+
+    /**
+    Specify a maximum request size in bytes.
+
+    This parameter can be used to control the maximum size of a single bulk request emitted.
+    Operations will be appended to the request until the `body_size` is reached.
+    */
+    pub fn body_size_bytes(mut self, body_size: usize) -> Self {
+        self.inner.body.with_inner_mut(|s| {
+            s.body_size = body_size;
+            Ok(())
+        });
+
+        self
+    }
+
+    /**
+    Create a channel for streaming bulk operations.
+    */
+    pub fn build(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
+        let body = self.inner.body.into_inner();
+
+        let body_size = body.body_size;
+        let duration = body.timeout;
+
+        let body = SenderBody::new(body_size);
+        let timeout = Timeout::new(duration);
+        let req_template = SenderRequestTemplate::new(self.client, self.params, self.inner.index, self.inner.ty);
+
+        BulkSender::new(req_template, timeout, body)
     }
 }
 
@@ -230,21 +337,6 @@ where
     }
 }
 
-impl<TSender, TBody, TDocument, TResponse> Extend<BulkOperation<TDocument>> for BulkRequestBuilder<TSender, TBody, TResponse>
-where
-    TSender: Sender,
-    TBody: BulkBody,
-    TDocument: Serialize,
-{
-    fn extend<T>(&mut self, iter: T) where
-    T: IntoIterator<Item = BulkOperation<TDocument>>,
-    {
-        for op in iter.into_iter() {
-            self.push(op);
-        }
-    }
-}
-
 impl<TBody, TResponse> BulkRequestBuilder<AsyncSender, TBody, TResponse>
 where
     TBody: Into<AsyncBody> + BulkBody + Send + 'static,
@@ -265,41 +357,8 @@ where
     }
 }
 
-impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, TResponse> {
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.inner.body.with_inner_mut(|s| {
-            s.timeout = timeout;
-            Ok(())
-        });
-
-        self
-    }
-
-    pub fn chunk_size_bytes(mut self, chunk_size: usize) -> Self {
-        self.inner.body.with_inner_mut(|s| {
-            s.chunk_size = chunk_size;
-            Ok(())
-        });
-
-        self
-    }
-
-    pub fn build(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
-        let body = self.inner.body.into_inner();
-
-        let chunk_size = body.chunk_size;
-        let duration = body.timeout;
-
-        let body = SenderBody::new(chunk_size);
-        let timeout = Timeout::new(duration);
-        let req_template = SenderRequestTemplate::new(self.client, self.params, self.inner.index, self.inner.ty);
-
-        BulkSender::new(req_template, timeout, body)
-    }
-}
-
 pub struct Streamed<TDocument> {
-    chunk_size: usize,
+    body_size: usize,
     timeout: Duration,
     _marker: PhantomData<TDocument>,
 }
@@ -307,7 +366,7 @@ pub struct Streamed<TDocument> {
 impl<TDocument> Streamed<TDocument> {
     fn new() -> Self {
         Streamed {
-            chunk_size: 1024 * 1024,
+            body_size: 1024 * 1024,
             timeout: Duration::from_secs(30),
             _marker: PhantomData,
         }
