@@ -1,5 +1,7 @@
 #![allow(missing_docs)]
 
+use std::fmt;
+use std::error::Error as StdError;
 use std::time::Duration;
 use std::marker::PhantomData;
 
@@ -28,7 +30,7 @@ pub use self::operation::*;
 pub struct BulkRequestInner<TBody, TResponse> {
     index: Option<Index<'static>>,
     ty: Option<Type<'static>>,
-    body: TBody,
+    body: WrappedBody<TBody>,
     _marker: PhantomData<TResponse>,
 }
 
@@ -43,26 +45,10 @@ where
             BulkRequestInner {
                 index: None,
                 ty: None,
-                body: Vec::new(),
+                body: WrappedBody::new(Vec::new()),
                 _marker: PhantomData,
             },
         )
-    }
-}
-
-pub struct Streamed<TDocument> {
-    chunk_size: usize,
-    timeout: Duration,
-    _marker: PhantomData<TDocument>,
-}
-
-impl<TDocument> Streamed<TDocument> {
-    fn new() -> Self {
-        Streamed {
-            chunk_size: 1024 * 1024,
-            timeout: Duration::from_secs(30),
-            _marker: PhantomData,
-        }
     }
 }
 
@@ -74,7 +60,7 @@ impl Client<AsyncSender> {
             BulkRequestInner {
                 index: None,
                 ty: None,
-                body: Streamed::new(),
+                body: WrappedBody::new(Streamed::new()),
                 _marker: PhantomData,
             },
         )
@@ -181,9 +167,7 @@ where
         TOperation: Into<BulkOperation<TDocument>>,
         TDocument: Serialize,
     {
-        // TODO: Handle this error somehow?
-        // Store until the request is sent?
-        let _ = self.inner.body.push(op.into());
+        self.inner.body.with_inner_mut(|b| b.push(op.into()));
     }
 
     pub fn append<TDocument, TOperation>(mut self, op: TOperation) -> Self
@@ -212,18 +196,20 @@ where
     TBody: BulkBody,
 {
     fn into_request(self) -> Result<BulkRequest<'static, TBody>, Error> {
+        let body = self.body.try_into_inner()?;
+
         match (self.index, self.ty) {
             (Some(index), None) => Ok(BulkRequest::for_index(
                 index,
-                self.body,
+                body,
             )),
             (Some(index), Some(ty)) => Ok(BulkRequest::for_index_ty(
                 index,
                 ty,
-                self.body,
+                body,
             )),
             (None, None) => Ok(BulkRequest::new(
-                self.body,
+                body,
             )),
             _ => unimplemented!()
         }
@@ -281,24 +267,110 @@ where
 
 impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, TResponse> {
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.inner.body.timeout = timeout;
+        self.inner.body.with_inner_mut(|s| {
+            s.timeout = timeout;
+            Ok(())
+        });
+
         self
     }
 
     pub fn chunk_size_bytes(mut self, chunk_size: usize) -> Self {
-        self.inner.body.chunk_size = chunk_size;
+        self.inner.body.with_inner_mut(|s| {
+            s.chunk_size = chunk_size;
+            Ok(())
+        });
+
         self
     }
 
     pub fn build(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
-        let chunk_size = self.inner.body.chunk_size;
-        let duration = self.inner.body.timeout;
+        let body = self.inner.body.into_inner();
+
+        let chunk_size = body.chunk_size;
+        let duration = body.timeout;
 
         let body = SenderBody::new(chunk_size);
         let timeout = Timeout::new(duration);
         let req_template = SenderRequestTemplate::new(self.client, self.params, self.inner.index, self.inner.ty);
 
         BulkSender::new(req_template, timeout, body)
+    }
+}
+
+pub struct Streamed<TDocument> {
+    chunk_size: usize,
+    timeout: Duration,
+    _marker: PhantomData<TDocument>,
+}
+
+impl<TDocument> Streamed<TDocument> {
+    fn new() -> Self {
+        Streamed {
+            chunk_size: 1024 * 1024,
+            timeout: Duration::from_secs(30),
+            _marker: PhantomData,
+        }
+    }
+}
+
+struct WrappedBody<T> {
+    inner: T,
+    errs: Vec<Error>,
+}
+
+impl<T> WrappedBody<T> {
+    fn new(inner: T) -> Self {
+        WrappedBody {
+            inner,
+            errs: Vec::new()
+        }
+    }
+
+    fn with_inner_mut<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut T) -> Result<(), Error>
+    {
+        if let Err(e) = f(&mut self.inner) {
+            self.errs.push(e);
+        }
+    }
+
+    fn try_into_inner(self) -> Result<T, Error> {
+        if self.errs.len() > 0 {
+            Err(error::request(BulkBodyError(self.errs)))
+        }
+        else {
+            Ok(self.inner)
+        }
+    }
+
+    fn into_inner(self) -> T {
+        debug_assert!(self.errs.len() == 0);
+
+        self.inner
+    }
+}
+
+#[derive(Debug)]
+struct BulkBodyError(Vec<Error>);
+
+impl fmt::Display for BulkBodyError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "{}", self.description())?;
+
+        for err in &self.0 {
+            err.fmt(f)?;
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl StdError for BulkBodyError {
+    fn description(&self) -> &str {
+        "error writing bulk request body"
     }
 }
 

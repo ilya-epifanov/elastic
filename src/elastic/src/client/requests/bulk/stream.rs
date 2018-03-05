@@ -16,7 +16,7 @@ use client::{AsyncSender, Client, RequestParams};
 use client::requests::RequestBuilder;
 use client::requests::params::{Index, Type};
 use client::responses::parse::IsOk;
-use super::{BulkRequestBuilder, BulkRequestInner, Pending, BulkOperation};
+use super::{BulkRequestBuilder, BulkRequestInner, Pending, BulkOperation, WrappedBody};
 
 pub struct BulkSender<TDocument, TResponse> {
     tx: BulkSenderInner<TResponse>,
@@ -70,7 +70,7 @@ impl<TResponse> SenderRequestTemplate<TResponse> {
             BulkRequestInner::<Vec<u8>, TResponse> {
                 index: self.index.clone(),
                 ty: self.ty.clone(),
-                body: body,
+                body: WrappedBody::new(body),
                 _marker: PhantomData,
             }
         )
