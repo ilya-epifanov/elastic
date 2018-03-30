@@ -5,13 +5,17 @@ use serde::ser::{Serialize, Serializer, SerializeMap};
 use serde_json;
 
 use client::requests::params::{Index, Type, Id};
+use client::requests::common::{Doc, Script, ScriptBuilder, DefaultParams};
 
 pub use client::responses::bulk::Action;
 
-pub struct BulkOperation<TDocument> {
+/**
+A bulk operation.
+*/
+pub struct BulkOperation<TValue> {
     action: Action,
     header: BulkHeader,
-    doc: Option<TDocument>,
+    inner: Option<TValue>,
 }
 
 #[derive(Serialize)]
@@ -32,58 +36,37 @@ where
     serializer.serialize_str(&*field.as_ref().expect("serialize `None` value"))
 }
 
-impl BulkOperation<()> {
-    pub fn new(action: Action) -> Self {
-        BulkOperation {
-            action,
-            header: BulkHeader {
-                index: None,
-                ty: None,
-                id: None,
-            },
-            doc: None,
-        }
-    }
-}
-
-impl<TDocument> BulkOperation<TDocument> {
-    pub fn index<I>(mut self, index: I) -> Self
-    where
-        I: Into<Index<'static>>,
-    {
-        self.header.index = Some(index.into());
-        self
-    }
-
-    pub fn ty<I>(mut self, ty: I) -> Self
-    where
-        I: Into<Type<'static>>,
-    {
-        self.header.ty = Some(ty.into());
-        self
-    }
-
-    pub fn id<I>(mut self, id: I) -> Self
-    where
-        I: Into<Id<'static>>,
-    {
-        self.header.id = Some(id.into());
-        self
-    }
-
-    pub fn doc<TNewDocument>(self, doc: TNewDocument) -> BulkOperation<TNewDocument> {
-        BulkOperation {
-            action: self.action,
-            header: self.header,
-            doc: Some(doc),
-        }
-    }
-}
-
 impl<TDocument> BulkOperation<TDocument>
 where
     TDocument: Serialize
 {
+    /**
+    A convenient method for creating an index bulk operation.
+    */
+    pub fn new_index(doc: TDocument) -> BulkOperation<Doc<TDocument>> {
+        BulkOperation::new(Action::Index, Some(Doc::value(doc)))
+    }
+
+    /**
+    A convenient method for creating an update bulk operation.
+    */
+    pub fn new_update(doc: TDocument) -> BulkOperation<Doc<TDocument>> {
+        BulkOperation::new(Action::Update, Some(Doc::value(doc)))
+    }
+
+    /**
+    A convenient method for creating a create bulk operation.
+    */
+    pub fn new_create(doc: TDocument) -> BulkOperation<Doc<TDocument>> {
+        BulkOperation::new(Action::Create, Some(Doc::value(doc)))
+    }
+
+    /**
+    Write the operation to the given writer.
+
+    Bulk operations have a particular line-delimited format.
+    This method will write a json header, then a newline, then the document body.
+    */
     pub fn write<W>(&self, mut writer: W) -> io::Result<()>
     where
         W: Write,
@@ -114,25 +97,130 @@ where
 
         serde_json::to_writer(&mut writer, &Header { action: self.action, inner: &self.header })?;
         write!(&mut writer, "\n")?;
-        serde_json::to_writer(&mut writer, &self.doc)?;
-        write!(&mut writer, "\n")?;
+
+        if let Some(ref inner) = self.inner {
+            serde_json::to_writer(&mut writer, inner)?;
+            write!(&mut writer, "\n")?;
+        }
 
         Ok(())
     }
 }
 
-pub fn bulk_index() -> BulkOperation<()> {
-    BulkOperation::new(Action::Index)
+impl BulkOperation<()> {
+    /**
+    A convenient method for creating a delete bulk operation.
+    */
+    pub fn new_delete() -> BulkOperation<()> {
+        BulkOperation::new(Action::Delete, None)
+    }
 }
 
-pub fn bulk_update() -> BulkOperation<()> {
-    BulkOperation::new(Action::Update)
+impl BulkOperation<Script<DefaultParams>> {
+    /**
+    A convenient method for creating an update bulk operation.
+    */
+    pub fn new_update_script<TScript>(script: TScript) -> BulkOperation<Script<DefaultParams>>
+    where
+        TScript: ToString,
+    {
+        BulkOperation::new(Action::Update, Some(Script::new(script)))
+    }
 }
 
-pub fn bulk_create() -> BulkOperation<()> {
-    BulkOperation::new(Action::Create)
+impl<TParams> BulkOperation<Script<TParams>> {
+    pub fn script_fluent<TScript, TBuilder, TNewParams>(mut self, builder: TBuilder) -> BulkOperation<Script<TNewParams>>
+    where
+        TBuilder: Fn(ScriptBuilder<TParams>) -> ScriptBuilder<TNewParams>,
+    {
+        unimplemented!()
+    }
 }
 
+impl<TValue> BulkOperation<TValue> {
+    /**
+    Create a new operation for the given action.
+    */
+    fn new(action: Action, value: Option<TValue>) -> Self {
+        BulkOperation {
+            action,
+            header: BulkHeader {
+                index: None,
+                ty: None,
+                id: None,
+            },
+            inner: value,
+        }
+    }
+    
+    /**
+    Set the index for this bulk operation.
+    */
+    pub fn index<I>(mut self, index: I) -> Self
+    where
+        I: Into<Index<'static>>,
+    {
+        self.header.index = Some(index.into());
+        self
+    }
+
+    /**
+    Set the type for this bulk operation.
+    */
+    pub fn ty<I>(mut self, ty: I) -> Self
+    where
+        I: Into<Type<'static>>,
+    {
+        self.header.ty = Some(ty.into());
+        self
+    }
+
+    /**
+    Set the id for this bulk operation.
+    */
+    pub fn id<I>(mut self, id: I) -> Self
+    where
+        I: Into<Id<'static>>,
+    {
+        self.header.id = Some(id.into());
+        self
+    }
+}
+
+/**
+A convenient method for creating an index bulk operation.
+*/
+pub fn bulk_index<TDocument>(doc: TDocument) -> BulkOperation<Doc<TDocument>> {
+    BulkOperation::new(Action::Index, Some(Doc::value(doc)))
+}
+
+/**
+A convenient method for creating an update bulk operation.
+*/
+pub fn bulk_update<TDocument>(doc: TDocument) -> BulkOperation<Doc<TDocument>> {
+    BulkOperation::new(Action::Update, Some(Doc::value(doc)))
+}
+
+/**
+A convenient method for creating a create bulk operation.
+*/
+pub fn bulk_create<TDocument>(doc: TDocument) -> BulkOperation<Doc<TDocument>> {
+    BulkOperation::new(Action::Create, Some(Doc::value(doc)))
+}
+
+/**
+A convenient method for creating an update bulk operation.
+*/
+pub fn bulk_update_script<TScript>(script: TScript) -> BulkOperation<Script<DefaultParams>>
+where
+    TScript: ToString,
+{
+    BulkOperation::new(Action::Update, Some(Script::new(script)))
+}
+
+/**
+A convenient method for creating a delete bulk operation.
+*/
 pub fn bulk_delete() -> BulkOperation<()> {
-    BulkOperation::new(Action::Delete)
+    BulkOperation::new(Action::Delete, None)
 }

@@ -18,6 +18,11 @@ use client::requests::params::{Index, Type};
 use client::responses::parse::IsOk;
 use super::{BulkRequestBuilder, BulkRequestInner, Pending, BulkOperation, WrappedBody};
 
+/**
+The sending half of a stream of bulk operations.
+
+The sender accepts individual operations and keeps them in a buffer until a timer has expired or the buffer fills up.
+*/
 pub struct BulkSender<TDocument, TResponse> {
     tx: BulkSenderInner<TResponse>,
     req_template: SenderRequestTemplate<TResponse>,
@@ -124,6 +129,11 @@ enum BulkSenderInFlight<TResponse> {
 struct BulkSenderInner<T>(Option<channel::Sender<T>>);
 struct BulkReceiverInner<T>(channel::Receiver<T>);
 
+/**
+The receiving half of a stream of bulk operations.
+
+The receiver emits complete bulk responses.
+*/
 pub struct BulkReceiver<TResponse> {
     rx: BulkReceiverInner<TResponse>
 }

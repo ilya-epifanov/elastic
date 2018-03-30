@@ -1,4 +1,8 @@
-#![allow(missing_docs)]
+/*!
+Builders for [bulk requests][docs-bulk].
+
+[docs-bulk]: https://www.elastic.co/guide/en/elasticsearch/reference/current/bulk.html
+*/
 
 use std::fmt;
 use std::error::Error as StdError;
@@ -18,6 +22,20 @@ use client::requests::raw::RawRequestInner;
 use client::responses::{BulkResponse, BulkErrorsResponse};
 use client::responses::parse::IsOk;
 
+/**
+A [bulk request][docs-bulk] builder that can be configured before sending. 
+
+Call [`Client.bulk`][Client.bulk] to get a `BulkRequestBuilder`.
+The `send` method will either send the request [synchronously][send-sync] or [asynchronously][send-async], depending on the `Client` it was created from.
+
+Call [`Client.bulk_stream`][Client.bulk_stream] to get a `BulkRequestBuilder` that can be used to stream bulk operations asynchronously.
+
+[docs-bulk]: https://www.elastic.co/guide/en/elasticsearch/reference/current/bulk.html
+[send-sync]: #send-synchronously
+[send-async]: #send-asynchronously
+[Client.bulk]: ../../struct.Client.html#bulk-request
+[Client.bulk_stream]: ../../struct.Client.html#bulk-stream-request
+*/
 pub type BulkRequestBuilder<TSender, TBody, TResponse> = RequestBuilder<TSender, BulkRequestInner<TBody, TResponse>>;
 
 mod stream;
@@ -34,10 +52,34 @@ pub struct BulkRequestInner<TBody, TResponse> {
     _marker: PhantomData<TResponse>,
 }
 
+/**
+# Bulk request
+*/
 impl<TSender> Client<TSender>
 where
     TSender: Sender,
 {
+    /** 
+    Create a [`BulkRequestBuilder`][BulkRequestBuilder] with this `Client` that can be configured before sending.
+
+    For more details, see:
+
+    - [builder methods][builder-methods]
+    - [send synchronously][send-sync]
+    - [send asynchronously][send-async]
+
+    # Examples
+
+    > TODO
+
+    [BulkRequestBuilder]: requests/search/type.BulkRequestBuilder.html
+    [builder-methods]: requests/search/type.BulkRequestBuilder.html#builder-methods
+    [send-sync]: requests/search/type.BulkRequestBuilder.html#send-synchronously
+    [send-async]: requests/search/type.BulkRequestBuilder.html#send-asynchronously
+    [types-mod]: ../../types/index.html
+    [documents-mod]: ../../types/document/index.html
+    [docs-querystring]: https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-query-string-query.html
+    */
     pub fn bulk(&self) -> BulkRequestBuilder<TSender, Vec<u8>, BulkResponse> {
         RequestBuilder::new(
             self.clone(),
@@ -52,7 +94,33 @@ where
     }
 }
 
+/**
+# Bulk stream request
+*/
 impl Client<AsyncSender> {
+    /** 
+    Create a [`BulkRequestBuilder`][BulkRequestBuilder] with this `Client` that can be configured before sending.
+
+    For more details, see:
+
+    - [builder methods][builder-methods]
+    - [stream builder methods][stream-builder-methods]
+    - [send synchronously][send-sync]
+    - [send asynchronously][send-async]
+
+    # Examples
+
+    > TODO
+
+    [BulkRequestBuilder]: requests/search/type.BulkRequestBuilder.html
+    [builder-methods]: requests/search/type.BulkRequestBuilder.html#builder-methods
+    [stream-builder-methods]: requests/search/type.BulkRequestBuilder.html#stream-builder-methods
+    [send-sync]: requests/search/type.BulkRequestBuilder.html#send-synchronously
+    [send-async]: requests/search/type.BulkRequestBuilder.html#send-asynchronously
+    [types-mod]: ../../types/index.html
+    [documents-mod]: ../../types/document/index.html
+    [docs-querystring]: https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-query-string-query.html
+    */
     pub fn bulk_stream<TDocument>(&self) -> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, BulkResponse> {
         RequestBuilder::new(
             self.clone(),
@@ -67,6 +135,11 @@ impl Client<AsyncSender> {
     }
 }
 
+/**
+# Builder methods
+
+Configure a `BulkRequestBuilder` before sending it.
+*/
 impl<TSender, TBody, TResponse> BulkRequestBuilder<TSender, TBody, TResponse>
 where
     TSender: Sender,
@@ -76,7 +149,9 @@ where
     
     If an operation doesn't specify a type, then it will default to the supplied value here.
     
-    > **NOTE:** Calling `ty` without also calling `index` will result in an error when sending the request.
+    # Deferred errors
+    
+    Calling `ty` without also calling `index` will result in an error when sending the request.
     */
     pub fn ty<I>(mut self, ty: I) -> Self
     where
@@ -175,6 +250,9 @@ where
 {
     /**
     Only deserialize failed bulk operations in the response.
+
+    Elasticsearch returns a response that's proportional in size to the number of operations in the request.
+    If you only care about failures then it can be more efficient to ignore the common case where operations succeed.
     */
     pub fn errors_only(self) -> BulkRequestBuilder<TSender, TBody, BulkErrorsResponse<TIndex, TType, TId>> {
         RequestBuilder::new(
@@ -206,7 +284,9 @@ where
     /**
     Push an operation onto the bulk request.
 
-    > **NOTE:** If the operation can't be serialized then sending the request will return an error.
+    # Deferred errors
+
+    If the document can't be serialized then sending the request will return an error.
     */
     pub fn push<TDocument, TOperation>(mut self, op: TOperation) -> Self
     where
@@ -220,7 +300,9 @@ where
     /**
     Push a collection of operations onto the bulk request.
 
-    > **NOTE:** If any operations can't be serialized then sending the request will return an error.
+    # Deferred errors
+
+    If any documents can't be serialized then sending the request will return an error.
     */
     pub fn extend<TIter, TDocument>(mut self, iter: TIter) -> Self
     where
@@ -249,6 +331,11 @@ where
     }
 }
 
+/**
+# Stream builder methods
+
+Configure a `SearchRequestBuilder` before sending it.
+*/
 impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, TResponse> {
     /**
     Specify a timeout for filling up the request buffer.
@@ -283,9 +370,18 @@ impl<TDocument, TResponse> BulkRequestBuilder<AsyncSender, Streamed<TDocument>, 
 
     /**
     Create a channel for streaming bulk operations.
+
+    This will return a channel with a [`BulkSender`] and [`BulkReceiver`] pair.
+    Push operations into the sender.
+    Once an internal buffer is full, or a timeout expires then the bulk request will be sent.
+    Responses can be pulled by the receiver.
+
+    # Examples
+
+    > TODO
     */
     pub fn build(self) -> (BulkSender<TDocument, TResponse>, BulkReceiver<TResponse>) {
-        let body = self.inner.body.into_inner();
+        let body = self.inner.body.try_into_inner().expect("building a stream should be infallible");
 
         let body_size = body.body_size;
         let duration = body.timeout;
@@ -318,16 +414,30 @@ where
             (None, None) => Ok(BulkRequest::new(
                 body,
             )),
-            _ => unimplemented!()
+            (None, Some(_)) => Err(error::request(BulkRequestError("missing `index` parameter".to_owned())))
         }
     }
 }
 
+/**
+# Send synchronously
+*/
 impl<TBody, TResponse> BulkRequestBuilder<SyncSender, TBody, TResponse>
 where
     TBody: Into<SyncBody> + BulkBody,
     TResponse: DeserializeOwned + IsOk + 'static,
 {
+    /**
+    Send a `BulkRequestBuilder` synchronously using a [`SyncClient`][SyncClient].
+
+    This will block the current thread until a response arrives and is deserialised.
+
+    # Examples
+
+    > TODO
+
+    [SyncClient]: ../../type.SyncClient.html
+    */
     pub fn send(self) -> Result<TResponse, Error> {
         let req = self.inner.into_request()?;
 
@@ -337,11 +447,25 @@ where
     }
 }
 
+/**
+# Send asynchronously
+*/
 impl<TBody, TResponse> BulkRequestBuilder<AsyncSender, TBody, TResponse>
 where
     TBody: Into<AsyncBody> + BulkBody + Send + 'static,
     TResponse: DeserializeOwned + IsOk + Send + 'static,
 {
+    /**
+    Send a `BulkRequestBuilder` asynchronously using an [`AsyncClient`][AsyncClient].
+    
+    This will return a future that will resolve to the deserialised search response.
+
+    # Examples
+
+    > TODO
+
+    [AsyncClient]: ../../type.AsyncClient.html
+    */
     pub fn send(self) -> Pending<TResponse> {
         let (client, params, inner) = (self.client, self.params, self.inner);
 
@@ -357,6 +481,12 @@ where
     }
 }
 
+const DEFAULT_BODY_SIZE: usize = 1024 * 1024 * 5;
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/**
+A streaming bulk request body.
+*/
 pub struct Streamed<TDocument> {
     body_size: usize,
     timeout: Duration,
@@ -366,8 +496,8 @@ pub struct Streamed<TDocument> {
 impl<TDocument> Streamed<TDocument> {
     fn new() -> Self {
         Streamed {
-            body_size: 1024 * 1024,
-            timeout: Duration::from_secs(30),
+            body_size: DEFAULT_BODY_SIZE,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             _marker: PhantomData,
         }
     }
@@ -403,12 +533,6 @@ impl<T> WrappedBody<T> {
             Ok(self.inner)
         }
     }
-
-    fn into_inner(self) -> T {
-        debug_assert!(self.errs.len() == 0);
-
-        self.inner
-    }
 }
 
 #[derive(Debug)]
@@ -416,11 +540,10 @@ struct BulkBodyError(Vec<Error>);
 
 impl fmt::Display for BulkBodyError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "{}", self.description())?;
+        writeln!(f, "errors ({}) writing bulk request body:", self.0.len())?;
 
         for err in &self.0 {
-            err.fmt(f)?;
-            writeln!(f)?;
+            writeln!(f, "{}", err)?;
         }
 
         Ok(())
@@ -429,11 +552,39 @@ impl fmt::Display for BulkBodyError {
 
 impl StdError for BulkBodyError {
     fn description(&self) -> &str {
-        "error writing bulk request body"
+        "errors writing bulk request body"
     }
 }
 
+#[derive(Debug)]
+struct BulkRequestError(String);
+
+impl fmt::Display for BulkRequestError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "{}", self.0)
+    }
+}
+
+impl StdError for BulkRequestError {
+    fn description(&self) -> &str {
+        "error building bulk request body"
+    }
+}
+
+/**
+A bulk request body.
+
+The body can receive a bulk operation for any type of document.
+*/
 pub trait BulkBody {
+    /**
+    Push a new document onto the end of the body.
+
+    # Errors
+
+    If the document can't be serialized then this method will return an error.
+    There's no guarantee that other operations can be pushed onto the body after an error has occurred.
+    */
     fn push<TDocument>(&mut self, op: BulkOperation<TDocument>) -> Result<(), Error> where TDocument: Serialize;
 }
 
@@ -445,6 +596,7 @@ impl BulkBody for Vec<u8> {
     }
 }
 
+/** A future returned by calling `send`. */
 pub struct Pending<TResponse> {
     inner: Box<Future<Item = TResponse, Error = Error>>,
 }
@@ -507,5 +659,58 @@ mod tests {
     use serde_json::{self, Value};
     use prelude::*;
 
-    
+    #[test]
+    fn default_request() {
+        let client = SyncClientBuilder::new().build().unwrap();
+
+        let req = client
+            .bulk()
+            .inner
+            .into_request()
+            .unwrap();
+
+        assert_eq!("/_bulk", req.url.as_ref());
+    }
+
+    #[test]
+    fn specify_index() {
+        let client = SyncClientBuilder::new().build().unwrap();
+
+        let req = client
+            .bulk()
+            .index("test-idx")
+            .inner
+            .into_request()
+            .unwrap();
+
+        assert_eq!("/test-idx/_bulk", req.url.as_ref());
+    }
+
+    #[test]
+    fn specify_index_ty() {
+        let client = SyncClientBuilder::new().build().unwrap();
+
+        let req = client
+            .bulk()
+            .index("test-idx")
+            .ty("new-ty")
+            .inner
+            .into_request()
+            .unwrap();
+
+        assert_eq!("/test-idx/new-ty/_bulk", req.url.as_ref());
+    }
+
+    #[test]
+    fn specify_ty() {
+        let client = SyncClientBuilder::new().build().unwrap();
+
+        let req = client
+            .bulk()
+            .ty("new-ty")
+            .inner
+            .into_request();
+
+        assert!(req.is_err());
+    }
 }

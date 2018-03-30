@@ -53,6 +53,8 @@ pub mod bulk;
 pub use self::ping::PingRequestBuilder;
 pub use self::bulk::BulkRequestBuilder;
 
+pub mod common;
+
 /**
 A builder for a request.
 
