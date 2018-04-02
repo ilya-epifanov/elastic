@@ -37,17 +37,16 @@ fn run() -> Result<(), Box<Error>> {
 
     let ops = (0..1000)
         .into_iter()
-        .map(|i| bulk_index()
-            .id(i)
-            .doc(json!({
+        .map(|i| bulk_index(json!({
                 "id": i,
                 "title": "some string value"
-            })));
+            }))
+            .id(i));
 
     let req_future = bulk_stream.send_all(stream::iter_ok(ops));
 
     let res_future = bulk_responses.for_each(|bulk| {
-        println!("repsonse:");
+        println!("response:");
         for op in bulk {
             match op {
                 Ok(op) => println!("  ok: {:?}", op),

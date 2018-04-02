@@ -1,3 +1,7 @@
+/*!
+Types that are common between requests.
+*/
+
 use serde::ser::{Serialize, Serializer};
 use serde_json::{Value, Map};
 
@@ -40,6 +44,7 @@ where
     }
 }
 
+/** A default set of script parameters. */
 pub type DefaultParams = Map<String, Value>;
 
 /** Update an indexed document using a script. */
@@ -100,6 +105,16 @@ impl ScriptBuilder<DefaultParams> {
 }
 
 impl<TParams> ScriptBuilder<TParams> {
+    pub(crate) fn from_script(script: Script<TParams>) -> Self {
+        let script = script.script;
+
+        ScriptBuilder {
+            source: script.source,
+            lang: script.lang,
+            params: script.params,
+        }
+    }
+
     /** Set the language for the update script. */
     pub fn lang<TLang>(mut self, lang: Option<TLang>) -> Self
     where

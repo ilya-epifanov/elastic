@@ -27,12 +27,11 @@ fn run() -> Result<(), Box<Error>> {
 
     let ops = (0..1000)
         .into_iter()
-        .map(|i| bulk_index()
-            .id(i)
-            .doc(json!({
+        .map(|i| bulk_index(json!({
                 "id": i,
                 "title": "some string value"
-            })));
+            }))
+            .id(i));
 
     // Execute a bulk request
     let res_future = client.bulk()
