@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["StrategyError",""]],"struct":[["RoundRobin","A round-robin strategy cycles through nodes sequentially. "],["StaticNodes","Select a base address for a given request using some strategy. "]],"trait":[["Strategy","The strategy selects an address from a given collection. "]]});

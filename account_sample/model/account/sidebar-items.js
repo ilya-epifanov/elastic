@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Gender",""]],"fn":[["name","Get the indexed document type name."]],"struct":[["Account","Our main model; an account in the bank."],["AccountMapping",""],["EmailMapping",""]],"type":[["Address",""],["City",""],["Email",""],["Employer",""],["FirstName",""],["LastName",""],["State",""]]});

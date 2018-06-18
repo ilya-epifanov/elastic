@@ -1,0 +1,13 @@
+var ALIASES = {};
+ALIASES['account_sample'] = {};
+ALIASES['derive_compile_test'] = {};
+ALIASES['elastic'] = {};
+ALIASES['elastic_codegen'] = {};
+ALIASES['elastic_derive'] = {};
+ALIASES['elastic_queries'] = {};
+ALIASES['elastic_requests'] = {};
+ALIASES['elastic_responses'] = {};
+ALIASES['elastic_types'] = {};
+ALIASES['elastic_types_derive'] = {};
+ALIASES['elastic_types_derive_internals'] = {};
+ALIASES['run'] = {};

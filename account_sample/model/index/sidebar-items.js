@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["body","Get the settings and mappings for the index."],["name","Get the name of the bank index."]]});

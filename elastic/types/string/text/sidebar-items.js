@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["mapping","Mapping for the Elasticsearch `text` type. "],["prelude","Includes all types for the `text` type."]]});

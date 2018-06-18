@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["BoolQuerySections",""],["Values",""]],"mod":[["prelude",""]],"struct":[["Bool",""],["BoolBuilder","Builder for `Bool`."],["Query",""],["QueryBuilder","Builder for `Query`."],["QueryField",""],["QueryFieldBuilder","Builder for `QueryField`."]]});

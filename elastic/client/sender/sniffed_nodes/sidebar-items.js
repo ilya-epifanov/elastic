@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["SniffedNodes","Periodically sniff nodes in a cluster."],["SniffedNodesBuilder","A builder for a cluster sniffer."]]});

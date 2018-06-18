@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["body","Type and declarations for the `Body` type."],["request","Type and declarations for the `Request` type."],["url","Type and declarations for the `Body` type."],["wrapped_ty","Macro for declaring a wrapped type declaration."]]});
